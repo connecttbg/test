@@ -113,6 +113,10 @@ def month_bounds(d: date):
     last = nxt - timedelta(days=1)
     return first, last
 
+def is_date_locked_for_user(work_date: date) -> bool:
+    """True jeśli zwykły użytkownik nie może już modyfikować tej daty (starsza niż 48h)."""
+    return (date.today() - work_date) > timedelta(days=2)
+
 def require_admin():
     if not current_user.is_authenticated or not current_user.is_admin:
         abort(403)
@@ -272,13 +276,32 @@ def logout():
 @login_required
 def dashboard():
     if request.method == "POST":
-        work_date = request.form.get("work_date")
+        work_date_str = request.form.get("work_date")
+        work_date = datetime.strptime(work_date_str, "%Y-%m-%d").date()
         project_id = int(request.form.get("project_id"))
         hhmm = request.form.get("hhmm", "0")
         minutes = parse_hhmm(hhmm)
         is_extra = bool(request.form.get("is_extra"))
         is_overtime = bool(request.form.get("is_overtime"))
         note = request.form.get("note") or ""
+
+        if (not current_user.is_admin) and is_date_locked_for_user(work_date):
+            flash("Możesz dodawać godziny maksymalnie do 48 godzin wstecz. Skontaktuj się z administratorem w sprawie starszych wpisów.")
+            return redirect(url_for("dashboard"))
+
+        e = Entry(
+            user_id=current_user.id,
+            project_id=project_id,
+            work_date=work_date,
+            minutes=minutes,
+            is_extra=is_extra,
+            is_overtime=is_overtime,
+            note=note,
+        )
+        db.session.add(e)
+        db.session.commit()
+        flash("Dodano wpis.")
+        return redirect(url_for("dashboard"))
 
         e = Entry(
             user_id=current_user.id,
@@ -404,7 +427,14 @@ def edit_entry(entry_id):
         abort(403)
 
     if request.method == "POST":
-        e.work_date = datetime.strptime(request.form.get("work_date"), "%Y-%m-%d").date()
+        work_date_str = request.form.get("work_date")
+        new_work_date = datetime.strptime(work_date_str, "%Y-%m-%d").date()
+
+        if (not current_user.is_admin) and is_date_locked_for_user(new_work_date):
+            flash("Możesz edytować godziny maksymalnie do 48 godzin wstecz. Skontaktuj się z administratorem w sprawie starszych wpisów.")
+            return redirect(url_for("dashboard"))
+
+        e.work_date = new_work_date
         e.project_id = int(request.form.get("project_id"))
         e.minutes = parse_hhmm(request.form.get("hhmm", "0"))
         e.is_extra = bool(request.form.get("is_extra"))
@@ -464,14 +494,11 @@ def edit_entry(entry_id):
 @login_required
 def delete_entry(entry_id):
     e = Entry.query.get_or_404(entry_id)
-
     if not (current_user.is_admin or e.user_id == current_user.id):
         abort(403)
-
     if (not current_user.is_admin) and is_date_locked_for_user(e.work_date):
         flash("Nie możesz usuwać wpisów starszych niż 48 godzin. Skontaktuj się z administratorem.")
         return redirect(url_for("dashboard"))
-
     db.session.delete(e)
     db.session.commit()
     flash("Usunięto wpis.")
@@ -1021,8 +1048,14 @@ def _replace_db_from_zipfileobj(fileobj):
                 pass
             raise
 
-    ensure_db_file()
+    # Reset SQLAlchemy connections so new DB is used
+    try:
+        db.session.remove()
+        db.engine.dispose()
+    except Exception:
+        pass
 
+    ensure_db_file()
 @app.route("/admin/backup", methods=["GET"])
 @login_required
 def admin_backup():
