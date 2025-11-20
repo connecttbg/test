@@ -113,6 +113,7 @@ def month_bounds(d: date):
     last = nxt - timedelta(days=1)
     return first, last
 
+
 def is_date_locked_for_user(work_date: date) -> bool:
     """True jeśli zwykły użytkownik nie może już modyfikować tej daty (starsza niż 48h)."""
     return (date.today() - work_date) > timedelta(days=2)
@@ -293,20 +294,6 @@ def dashboard():
             user_id=current_user.id,
             project_id=project_id,
             work_date=work_date,
-            minutes=minutes,
-            is_extra=is_extra,
-            is_overtime=is_overtime,
-            note=note,
-        )
-        db.session.add(e)
-        db.session.commit()
-        flash("Dodano wpis.")
-        return redirect(url_for("dashboard"))
-
-        e = Entry(
-            user_id=current_user.id,
-            project_id=project_id,
-            work_date=datetime.strptime(work_date, "%Y-%m-%d").date(),
             minutes=minutes,
             is_extra=is_extra,
             is_overtime=is_overtime,
@@ -1048,14 +1035,8 @@ def _replace_db_from_zipfileobj(fileobj):
                 pass
             raise
 
-    # Reset SQLAlchemy connections so new DB is used
-    try:
-        db.session.remove()
-        db.engine.dispose()
-    except Exception:
-        pass
-
     ensure_db_file()
+
 @app.route("/admin/backup", methods=["GET"])
 @login_required
 def admin_backup():
