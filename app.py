@@ -113,11 +113,6 @@ def month_bounds(d: date):
     last = nxt - timedelta(days=1)
     return first, last
 
-
-def is_date_locked_for_user(work_date: date) -> bool:
-    """True jeśli zwykły użytkownik nie może już modyfikować tej daty (starsza niż 48h)."""
-    return (date.today() - work_date) > timedelta(days=2)
-
 def require_admin():
     if not current_user.is_authenticated or not current_user.is_admin:
         abort(403)
@@ -278,7 +273,6 @@ def logout():
 def dashboard():
     if request.method == "POST":
         work_date_str = request.form.get("work_date")
-        work_date = datetime.strptime(work_date_str, "%Y-%m-%d").date()
         project_id = int(request.form.get("project_id"))
         hhmm = request.form.get("hhmm", "0")
         minutes = parse_hhmm(hhmm)
@@ -286,9 +280,21 @@ def dashboard():
         is_overtime = bool(request.form.get("is_overtime"))
         note = request.form.get("note") or ""
 
-        if (not current_user.is_admin) and is_date_locked_for_user(work_date):
-            flash("Możesz dodawać godziny maksymalnie do 48 godzin wstecz. Skontaktuj się z administratorem w sprawie starszych wpisów.")
+        # Konwersja daty z formularza
+        try:
+            work_date = datetime.strptime(work_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            flash("Nieprawidłowa data.")
             return redirect(url_for("dashboard"))
+
+        # Ograniczenie 48h tylko dla zwykłych użytkowników (nie adminów)
+        if not getattr(current_user, "is_admin", False):
+            now = datetime.now()
+            # Traktujemy koniec dnia roboczego jako granicę (23:59:59 danego dnia)
+            end_of_work_date = datetime.combine(work_date, datetime.max.time())
+            if end_of_work_date < now - timedelta(hours=48):
+                flash("Godziny zostaly zablokowane poniewaz mozesz dodawac je maksymalnie do 48h skontaktuj sie z Darkiem +4746572904.")
+                return redirect(url_for("dashboard"))
 
         e = Entry(
             user_id=current_user.id,
@@ -414,14 +420,7 @@ def edit_entry(entry_id):
         abort(403)
 
     if request.method == "POST":
-        work_date_str = request.form.get("work_date")
-        new_work_date = datetime.strptime(work_date_str, "%Y-%m-%d").date()
-
-        if (not current_user.is_admin) and is_date_locked_for_user(new_work_date):
-            flash("Możesz edytować godziny maksymalnie do 48 godzin wstecz. Skontaktuj się z administratorem w sprawie starszych wpisów.")
-            return redirect(url_for("dashboard"))
-
-        e.work_date = new_work_date
+        e.work_date = datetime.strptime(request.form.get("work_date"), "%Y-%m-%d").date()
         e.project_id = int(request.form.get("project_id"))
         e.minutes = parse_hhmm(request.form.get("hhmm", "0"))
         e.is_extra = bool(request.form.get("is_extra"))
@@ -483,9 +482,6 @@ def delete_entry(entry_id):
     e = Entry.query.get_or_404(entry_id)
     if not (current_user.is_admin or e.user_id == current_user.id):
         abort(403)
-    if (not current_user.is_admin) and is_date_locked_for_user(e.work_date):
-        flash("Nie możesz usuwać wpisów starszych niż 48 godzin. Skontaktuj się z administratorem.")
-        return redirect(url_for("dashboard"))
     db.session.delete(e)
     db.session.commit()
     flash("Usunięto wpis.")
@@ -1002,39 +998,24 @@ def _replace_db_from_zipfileobj(fileobj):
     target_dir = os.path.dirname(DB_FILE) or "."
     os.makedirs(target_dir, exist_ok=True)
 
-    with zipfile.ZipFile(fileobj, "r") as z:
-        if "app.db" not in z.namelist():
-            raise RuntimeError("Brak pliku 'app.db' w archiwum.")
-        with z.open("app.db") as src, tempfile.NamedTemporaryFile("wb", dir=target_dir, delete=False) as tmp:
-            shutil.copyfileobj(src, tmp, length=1024*1024)
-            tmp_path = tmp.name
-
+    # Zamykamy aktualne połączenia z bazą
     db.session.remove()
     try:
         db.engine.dispose()
     except Exception:
         pass
 
-    final_path = os.path.join(target_dir, "app.db")
-    if os.path.exists(final_path):
-        try:
-            os.remove(final_path)
-        except Exception as e:
-            raise RuntimeError(f"Nie mogę zastąpić istniejącej bazy: {e}")
+    # Podmieniamy plik bazy danymi z archiwum
+    with zipfile.ZipFile(fileobj, "r") as z:
+        if "app.db" not in z.namelist():
+            raise RuntimeError("Brak pliku 'app.db' w archiwum.")
+        final_path = DB_FILE
+        os.makedirs(os.path.dirname(final_path) or ".", exist_ok=True)
+        with z.open("app.db") as src, open(final_path, "wb") as dst:
+            shutil.copyfileobj(src, dst, length=1024*1024)
 
-    try:
-        os.replace(tmp_path, final_path)
-    except OSError as e:
-        if getattr(e, "errno", None) == errno.EXDEV:
-            shutil.copyfile(tmp_path, final_path)
-            os.remove(tmp_path)
-        else:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
-            raise
-
+    # Po podmianie upewniamy się, że struktura tabel istnieje,
+    # ale nie kasujemy danych z backupu
     ensure_db_file()
 
 @app.route("/admin/backup", methods=["GET"])
