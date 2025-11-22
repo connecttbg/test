@@ -209,6 +209,8 @@ BASE = """
   {% endwith %}
   {{ body|safe }}
 </div>
+
+<div class="text-center mt-4 text-muted" style="font-size:12px;">aplikacja utworzona przez dataconnect.no</div>
 </body>
 </html>
 """
@@ -990,32 +992,40 @@ def _make_zip_bytes(path)->bytes:
     return mem.read()
 
 def _replace_db_from_zipfileobj(fileobj):
+    """Podmienia plik bazy danymi z archiwum ZIP (app.db w środku).
+
+    1. Zamyka aktualne połączenia SQLAlchemy.
+    2. Nadpisuje fizyczny plik DB_FILE zawartością app.db z backupu.
+    3. Woła ensure_db_file(), aby upewnić się, że struktura tabel istnieje.
+    """
     try:
         fileobj.seek(0)
     except Exception:
         pass
 
-    target_dir = os.path.dirname(DB_FILE) or "."
+    # Ścieżka do aktualnej bazy
+    target_path = DB_FILE
+    target_dir = os.path.dirname(target_path) or "."
     os.makedirs(target_dir, exist_ok=True)
 
-    # Zamykamy aktualne połączenia z bazą
-    db.session.remove()
+    # Zamykanie połączeń z bazą
+    try:
+        db.session.remove()
+    except Exception:
+        pass
     try:
         db.engine.dispose()
     except Exception:
         pass
 
-    # Podmieniamy plik bazy danymi z archiwum
+    # Nadpisanie pliku bazy danymi z kopii zapasowej
     with zipfile.ZipFile(fileobj, "r") as z:
         if "app.db" not in z.namelist():
             raise RuntimeError("Brak pliku 'app.db' w archiwum.")
-        final_path = DB_FILE
-        os.makedirs(os.path.dirname(final_path) or ".", exist_ok=True)
-        with z.open("app.db") as src, open(final_path, "wb") as dst:
-            shutil.copyfileobj(src, dst, length=1024*1024)
+        with z.open("app.db") as src, open(target_path, "wb") as dst:
+            shutil.copyfileobj(src, dst, length=1024 * 1024)
 
-    # Po podmianie upewniamy się, że struktura tabel istnieje,
-    # ale nie kasujemy danych z backupu
+    # Odtworzenie struktury (jeśli trzeba), bez kasowania danych
     ensure_db_file()
 
 @app.route("/admin/backup", methods=["GET"])
@@ -1026,9 +1036,26 @@ def admin_backup():
     bdir = os.path.join(base, "backups") if base else "backups"
     os.makedirs(bdir, exist_ok=True)
     files = sorted([f for f in os.listdir(bdir) if f.endswith(".zip")])
+
+    # Proste statystyki bieżącej bazy
+    db_path = DB_FILE
+    users = projects = entries = None
+    try:
+        users = User.query.count()
+        projects = Project.query.count()
+        entries = Entry.query.count()
+    except Exception:
+        pass
+
     body = render_template_string("""
 <div class="card p-3">
   <h5 class="mb-3">Kopie zapasowe</h5>
+  <p class="small text-muted">
+    Baza danych: <code>{{ db_path }}</code><br>
+    Użytkownicy: {{ users if users is not none else "?" }},
+    Projekty: {{ projects if projects is not none else "?" }},
+    Wpisy: {{ entries if entries is not none else "?" }}
+  </p>
   <form class="d-inline" method="post" action="{{ url_for('admin_backup_create') }}">
     <button class="btn btn-primary">Utwórz i pobierz kopię teraz</button>
   </form>
@@ -1059,7 +1086,7 @@ def admin_backup():
     <div class="text-muted">Brak zapisanych kopii.</div>
   {% endif %}
 </div>
-""", files=files)
+""", files=files, db_path=db_path, users=users, projects=projects, entries=entries)
     return layout("Kopie zapasowe", body)
 
 @app.route("/admin/backup/create", methods=["POST"])
@@ -1109,7 +1136,11 @@ def admin_backup_restore():
     try:
         mem = io.BytesIO(f.read())
         _replace_db_from_zipfileobj(mem)
-        flash("Przywrócono bazę z załączonego pliku.")
+        # Statystyki po przywróceniu – żeby było widać, że dane są
+        users = User.query.count()
+        projects = Project.query.count()
+        entries = Entry.query.count()
+        flash(f"Przywrócono bazę z załączonego pliku. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
     except Exception as e:
         flash(f"Błąd przywracania: {e}")
     return redirect(url_for("admin_backup"))
@@ -1126,7 +1157,11 @@ def admin_backup_restore_saved(fname):
     try:
         with open(path, "rb") as fp:
             _replace_db_from_zipfileobj(fp)
-        flash(f"Przywrócono bazę z {fname}.")
+        # Statystyki po przywróceniu – żeby było widać, że dane są
+        users = User.query.count()
+        projects = Project.query.count()
+        entries = Entry.query.count()
+        flash(f"Przywrócono bazę z {fname}. Użytkownicy: {users}, Projekty: {projects}, Wpisy: {entries}")
     except Exception as e:
         flash(f"Błąd przywracania: {e}")
     return redirect(url_for("admin_backup"))
